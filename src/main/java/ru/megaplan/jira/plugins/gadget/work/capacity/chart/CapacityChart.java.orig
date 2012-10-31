@@ -1,0 +1,526 @@
+
+package ru.megaplan.jira.plugins.gadget.work.capacity.chart;
+
+import com.atlassian.core.util.DateUtils;
+import com.atlassian.crowd.embedded.api.User;
+import com.atlassian.jira.bc.issue.search.SearchService;
+import com.atlassian.jira.charts.Chart;
+import com.atlassian.jira.charts.ChartFactory;
+import com.atlassian.jira.charts.jfreechart.ChartHelper;
+import com.atlassian.jira.charts.jfreechart.CreatedVsResolvedChartGenerator;
+import com.atlassian.jira.charts.jfreechart.util.ChartUtil;
+import com.atlassian.jira.charts.util.DataUtils;
+import com.atlassian.jira.config.properties.ApplicationProperties;
+import com.atlassian.jira.issue.IssueFieldConstants;
+import com.atlassian.jira.issue.index.DocumentConstants;
+import com.atlassian.jira.issue.index.IssueIndexManager;
+import com.atlassian.jira.issue.search.SearchContext;
+import com.atlassian.jira.issue.search.SearchException;
+import com.atlassian.jira.issue.search.SearchProvider;
+import com.atlassian.jira.issue.search.SearchRequest;
+import com.atlassian.jira.issue.search.managers.IssueSearcherManager;
+import com.atlassian.jira.issue.search.searchers.IssueSearcher;
+import com.atlassian.jira.issue.search.searchers.transformer.ProjectSearchInputTransformer;
+import com.atlassian.jira.issue.statistics.DatePeriodStatisticsMapper;
+import com.atlassian.jira.issue.statistics.StatisticsMapper;
+import com.atlassian.jira.issue.statistics.util.OneDimensionalObjectHitCollector;
+import com.atlassian.jira.project.Project;
+import com.atlassian.jira.project.ProjectManager;
+import com.atlassian.jira.project.version.Version;
+import com.atlassian.jira.project.version.VersionManager;
+import com.atlassian.jira.timezone.TimeZoneManager;
+import com.atlassian.jira.util.dbc.Assertions;
+import com.atlassian.jira.util.velocity.DefaultVelocityRequestContextFactory;
+import com.atlassian.jira.util.velocity.VelocityRequestContext;
+import com.atlassian.jira.web.bean.I18nBean;
+import com.atlassian.query.Query;
+import com.atlassian.query.QueryImpl;
+import org.apache.commons.lang.StringUtils;
+import org.apache.commons.lang.mutable.MutableInt;
+import org.apache.log4j.Logger;
+import org.apache.lucene.search.*;
+import org.jfree.chart.labels.StandardXYToolTipGenerator;
+import org.jfree.chart.plot.ValueMarker;
+import org.jfree.chart.plot.XYPlot;
+import org.jfree.chart.renderer.xy.XYItemRenderer;
+import org.jfree.chart.urls.XYURLGenerator;
+import org.jfree.data.category.CategoryDataset;
+import org.jfree.data.category.DefaultCategoryDataset;
+import org.jfree.data.time.RegularTimePeriod;
+import org.jfree.data.time.TimePeriod;
+import org.jfree.data.time.TimeSeries;
+import org.jfree.data.time.TimeSeriesCollection;
+import org.jfree.data.xy.XYDataset;
+import ru.megaplan.jira.plugins.gadget.work.capacity.action.util.StatusFact;
+import ru.megaplan.jira.plugins.gadget.work.capacity.service.CapacityHistoryService;
+
+import java.awt.*;
+import java.io.IOException;
+import java.sql.Timestamp;
+import java.text.NumberFormat;
+import java.util.*;
+import java.util.List;
+
+import static com.atlassian.jira.charts.ChartFactory.PeriodName;
+import static com.atlassian.jira.charts.ChartFactory.VersionLabel;
+
+/**
+ * Produces a created vs resolved chart given a searchrequest.
+ *
+ * @since v4.0
+ */
+public class CapacityChart
+{
+
+    private final static Logger log = Logger.getLogger(CapacityChart.class);
+
+    private final SearchProvider searchProvider;
+    private final VersionManager versionManager;
+    private final IssueIndexManager issueIndexManager;
+    private final IssueSearcherManager issueSearcherManager;
+    private final ProjectManager projectManager;
+    private final ApplicationProperties applicationProperties;
+    private final SearchService searchService;
+    private final TimeZoneManager timeZoneManager;
+    private final CapacityHistoryService capacityHistoryService;
+
+    public CapacityChart(SearchProvider searchProvider, VersionManager versionManager,
+                         IssueIndexManager issueIndexManager, IssueSearcherManager issueSearcherManager,
+                         ProjectManager projectManager, ApplicationProperties applicationProperties, SearchService searchService,
+                         TimeZoneManager timeZoneManager, CapacityHistoryService capacityHistoryService)
+    {
+        this.searchProvider = searchProvider;
+        this.versionManager = versionManager;
+        this.issueIndexManager = issueIndexManager;
+        this.issueSearcherManager = issueSearcherManager;
+        this.projectManager = projectManager;
+        this.applicationProperties = applicationProperties;
+        this.searchService = searchService;
+        this.timeZoneManager = timeZoneManager;
+        this.capacityHistoryService = capacityHistoryService;
+    }
+
+    public Chart generateChart(final User remoteUser, final SearchRequest searchRequest, int days, final PeriodName periodName, VersionLabel versionLabel, final boolean cumulative,
+                               boolean showUnresolvedTrend, int width, int height, Set<String> statusesIn, Set<String> assignees, boolean mergeStatuses)
+    {
+        Assertions.notNull("searchrequest", searchRequest);
+        days = DataUtils.normalizeDaysValue(days, periodName);
+
+        try
+        {
+            final Map<String, Object> params = new HashMap<String, Object>();
+
+            final Query query = searchRequest.getQuery();
+            final SearchContext searchContext = searchService.getSearchContext(remoteUser, query);
+            List domainMarkers = null;
+            final IssueSearcher projectSearcher = issueSearcherManager.getSearcher(IssueFieldConstants.PROJECT);
+            final ProjectSearchInputTransformer searchInputTransformer = (ProjectSearchInputTransformer) projectSearcher.getSearchInputTransformer();
+            final Set<String> projectIds = searchInputTransformer.getIdValuesAsStrings(remoteUser, query, searchContext);
+            if (projectIds != null && !VersionLabel.none.equals(versionLabel))
+            {
+                domainMarkers = getDomainMarkers(projectIds, days, periodName, versionLabel);
+            }
+
+            //JqlQueryBuilder jqlQueryBuilder = JqlQueryBuilder.newBuilder(query);
+            //JqlClauseBuilder whereClauseBuilder = jqlQueryBuilder.where().defaultAnd();
+            List<StatusFact> facts = capacityHistoryService.getStatusFacts(query, remoteUser);
+            final Map<RegularTimePeriod, Number> createdDataMap = getChangedIssues(facts, periodName, true, days, statusesIn, assignees, mergeStatuses);
+
+//            jqlQueryBuilder = JqlQueryBuilder.newBuilder(query);
+//            whereClauseBuilder = jqlQueryBuilder.where().defaultAnd();
+//            whereClauseBuilder.resolutionDateAfter("-" + days + "d");
+            final Map<RegularTimePeriod, Number> resolvedDataMap = getChangedIssues(facts, periodName, false, days, statusesIn, assignees, mergeStatuses);
+
+            params.put("numCreatedIssues", DataUtils.getTotalNumber(createdDataMap));
+            params.put("numResolvedIssues", DataUtils.getTotalNumber(resolvedDataMap));
+
+            final Class timePeriodClass = ChartUtil.getTimePeriodClass(periodName);
+            DataUtils.normaliseDateRangeCount(createdDataMap, days - 1, timePeriodClass, timeZoneManager.getLoggedInUserTimeZone()); // only need to do one map as normalising both map keys will fix second
+            DataUtils.normaliseMapKeys(createdDataMap, resolvedDataMap);
+
+            // calculate trend of unresolved as a difference of the existing maps
+            final Map<RegularTimePeriod, Number> unresolvedTrendDataMap = new TreeMap<RegularTimePeriod, Number>();
+            if (showUnresolvedTrend)
+            {
+                int unresolvedTrend = 0;
+                for (RegularTimePeriod key : createdDataMap.keySet())
+                {
+                    Integer created = (Integer) createdDataMap.get(key);
+                    Integer resolved = (Integer) resolvedDataMap.get(key);
+
+                    unresolvedTrend = unresolvedTrend + created - resolved;
+                    unresolvedTrendDataMap.put(key, unresolvedTrend);
+                }
+            }
+
+            final I18nBean i18nBean = getI18nBean(remoteUser);
+            String created = i18nBean.getText("issue.field.created");
+            String resolved = i18nBean.getText("portlet.createdvsresolved.resolved");
+            String unresolvedTrend = i18nBean.getText("portlet.createdvsresolved.trendOfUnresolved");
+            Map[] dataMaps = showUnresolvedTrend ? new Map[] { createdDataMap, resolvedDataMap, unresolvedTrendDataMap } : new Map[] { createdDataMap, resolvedDataMap };
+            String[] seriesNames = showUnresolvedTrend ? new String[] { created, resolved, unresolvedTrend } : new String[] { created, resolved };
+            CategoryDataset dataset = getCategoryDataset(dataMaps, seriesNames);
+
+            if (cumulative)
+            {
+                DataUtils.makeCumulative(createdDataMap);
+                DataUtils.makeCumulative(resolvedDataMap);
+            }
+
+            XYDataset createdVsResolved = generateTimeSeriesXYDataset(created, createdDataMap, resolved, resolvedDataMap);
+            TimeSeries trendSeries = null;
+            if (showUnresolvedTrend)
+            {
+                trendSeries = createTimeSeries(unresolvedTrend, unresolvedTrendDataMap);
+            }
+            ChartHelper chartHelper = new CreatedVsResolvedChartGenerator(createdVsResolved, trendSeries, domainMarkers, i18nBean).generateChart();
+
+            XYPlot plot = (XYPlot) chartHelper.getChart().getPlot();
+            XYItemRenderer renderer = plot.getRenderer();
+            renderer.setToolTipGenerator(new StandardXYToolTipGenerator("{0} {2} " + i18nBean.getText("portlet.createdvsresolved.tooltip.issues"), NumberFormat.getNumberInstance(), NumberFormat.getNumberInstance()));
+            final VelocityRequestContext velocityRequestContext = new DefaultVelocityRequestContextFactory(applicationProperties).getJiraVelocityRequestContext();
+            XYURLGenerator xyurlGenerator = new XYURLGenerator()
+            {
+                public String generateURL(XYDataset xyDataset, int series, int item)
+                {
+                    final TimeSeriesCollection timeSeriesCollection = (TimeSeriesCollection) xyDataset;
+                    //only display links if the chart is not cumulative.  If it's cumulative, links don't make sense!
+                    if (!cumulative && series < timeSeriesCollection.getSeriesCount())
+                    {
+                        final TimeSeries timeSeries = timeSeriesCollection.getSeries(series);
+                        final RegularTimePeriod timePeriod = timeSeries.getTimePeriod(item);
+                        StatisticsMapper mapper = null;
+                        if (series == 0)
+                        {
+                            mapper = new DatePeriodStatisticsMapper(ChartUtil.getTimePeriodClass(periodName), DocumentConstants.ISSUE_CREATED, getTimeZone());
+                        }
+                        else if (series == 1)
+                        {
+                            mapper = new DatePeriodStatisticsMapper(ChartUtil.getTimePeriodClass(periodName), DocumentConstants.ISSUE_RESOLUTION_DATE, getTimeZone());
+                        }
+                        if (mapper != null)
+                        {
+                            final SearchRequest searchUrlSuffix = mapper.getSearchUrlSuffix(timePeriod, searchRequest);
+                            String url = velocityRequestContext.getCanonicalBaseUrl() + "/secure/IssueNavigator.jspa?reset=true" + searchService.getQueryString(remoteUser, (searchUrlSuffix == null) ? new QueryImpl() : searchUrlSuffix.getQuery());
+       //                     log.warn("generated url : " + url);
+                            return url;
+                        }
+                    }
+                    return null;
+                }
+            };
+            renderer.setURLGenerator(xyurlGenerator);
+            log.warn( chartHelper.getImageMapName());
+
+
+            chartHelper.generate(width, height);
+
+            params.put("chart", chartHelper.getLocation());
+            params.put("daysPrevious", days);
+            params.put("chartDataset", createdVsResolved);
+            params.put("trendSeries", trendSeries);
+            params.put("completeDataset", dataset);
+            params.put("completeDatasetUrlGenerator", xyurlGenerator);
+            params.put("period", periodName.toString());
+            params.put("cumulative", Boolean.toString(cumulative));
+            params.put("showUnresolvedTrend", Boolean.toString(showUnresolvedTrend));
+            params.put("versionLabels", versionLabel.toString());
+            params.put("imagemap", chartHelper.getImageMap());
+            params.put("imagemapName", chartHelper.getImageMapName());
+            params.put("imageWidth", width);
+            params.put("imageHeight", height);
+
+            return new Chart(chartHelper.getLocation(), chartHelper.getImageMap(), chartHelper.getImageMapName(), params);
+        }
+        catch (IOException e)
+        {
+            throw new RuntimeException("Error generating chart", e);
+        }
+        catch (SearchException e)
+        {
+            throw new RuntimeException("Error generating chart", e);
+        }
+    }
+
+    private TimeZone getTimeZone()
+    {
+        return timeZoneManager.getLoggedInUserTimeZone();
+    }
+
+    private List getDomainMarkers(Set<String> projectIds, int days, ChartFactory.PeriodName periodName, VersionLabel versionLabel)
+    {
+        //if we don't want versions labels, or if we don't have any project ids don't show labels.
+        if (VersionLabel.none.equals(versionLabel) || projectIds.isEmpty())
+        {
+            return Collections.EMPTY_LIST;
+        }
+
+        final List<Long> searchedProjectIds = transformToLongs(projectIds);
+        final Set<Version> versions = new HashSet<Version>();
+        final Map<Long, String> projectIdToNameMapping = new HashMap<Long, String>();
+        for (Long searchedProjectId : searchedProjectIds)
+        {
+            // JRA-18210 - we should only included unarchived versions
+            versions.addAll(versionManager.getVersionsUnarchived(searchedProjectId));
+            //if there's more than one project we'll want to display the project key next to the version
+            //so the user knows what project a particular version corresponds to.
+            if (searchedProjectIds.size() > 1)
+            {
+                final Project projectObj = projectManager.getProjectObj(searchedProjectId);
+                if (projectObj != null)
+                {
+                    projectIdToNameMapping.put(searchedProjectId, projectObj.getKey());
+                }
+            }
+        }
+
+        final Date releasedAfter = new Date(System.currentTimeMillis() - days * DateUtils.DAY_MILLIS);
+        final List<ValueMarker> markers = new ArrayList<ValueMarker>();
+        final Class periodClass = ChartUtil.getTimePeriodClass(periodName);
+
+        for (final Version version : versions)
+        {
+            if (version.getReleaseDate() != null && releasedAfter.before(version.getReleaseDate()))
+            {
+                RegularTimePeriod timePeriod = RegularTimePeriod.createInstance(periodClass, version.getReleaseDate(), RegularTimePeriod.DEFAULT_TIME_ZONE);
+                ValueMarker valueMarker = new ValueMarker(timePeriod.getFirstMillisecond());
+                boolean isMinorVersion = isMinorVersion(version);
+
+                // skip minor versions
+                if (VersionLabel.major.equals(versionLabel) && isMinorVersion)
+                {
+                    continue;
+                }
+
+                if (isMinorVersion)
+                {
+                    valueMarker.setPaint(Color.LIGHT_GRAY); // minor version
+                    valueMarker.setStroke(new BasicStroke(1.0f));
+                }
+                else
+                {
+                    valueMarker.setPaint(Color.GRAY); // major version
+                    valueMarker.setStroke(new BasicStroke(1.2f));
+                    valueMarker.setLabelPaint(Color.GRAY);
+                    String valueMarkerLabel = version.getName();
+                    final Long projectId = version.getProjectObject().getId();
+                    //if there's a mapping, use it.
+                    if (projectIdToNameMapping.containsKey(projectId))
+                    {
+                        valueMarkerLabel = valueMarkerLabel + "[" + projectIdToNameMapping.get(projectId) + "]";
+                    }
+                    valueMarker.setLabel(valueMarkerLabel);
+                }
+                markers.add(valueMarker);
+            }
+        }
+
+        return markers;
+    }
+
+    private List<Long> transformToLongs(final Set<String> projects)
+    {
+        final List<Long> ids = new ArrayList<Long>(projects.size());
+
+        for (String idStr : projects)
+        {
+            final Long id = getValueAsLong(idStr);
+            if (id != null)
+            {
+                ids.add(id);
+            }
+        }
+        return ids;
+    }
+
+    private Long getValueAsLong(final String value)
+    {
+        try
+        {
+            return new Long(value);
+        }
+        catch (NumberFormatException e)
+        {
+            return null;
+        }
+    }
+
+    private CategoryDataset getCategoryDataset(Map[] dataMaps, String[] seriesNames)
+    {
+        DefaultCategoryDataset dataset = new DefaultCategoryDataset();
+
+        if (dataMaps.length != seriesNames.length)
+        {
+            throw new IllegalArgumentException("Number of datamaps and series names must be the equal.");
+        }
+
+        for (int i = 0; i < seriesNames.length; i++)
+        {
+            String seriesName = seriesNames[i];
+            Map data = dataMaps[i];
+            for (Iterator iterator = data.keySet().iterator(); iterator.hasNext(); )
+            {
+                RegularTimePeriod period = (RegularTimePeriod) iterator.next();
+                dataset.addValue((Number) data.get(period), seriesName, period);
+            }
+        }
+
+        return dataset;
+    }
+
+    private XYDataset generateTimeSeriesXYDataset(String series1Name, Map series1Map, String series2Name, Map series2Map)
+    {
+        TimeSeriesCollection dataset = new TimeSeriesCollection();
+        if (series1Name != null && series1Map != null)
+        {
+            dataset.addSeries(createTimeSeries(series1Name, series1Map));
+        }
+        if (series2Name != null && series2Map != null)
+        {
+            dataset.addSeries(createTimeSeries(series2Name, series2Map));
+        }
+
+        return dataset;
+    }
+
+    private TimeSeries createTimeSeries(final String seriesName, final Map seriesMap)
+    {
+        TimeSeries series = null;
+
+        for (Iterator iterator = seriesMap.keySet().iterator(); iterator.hasNext(); )
+        {
+            RegularTimePeriod period = (RegularTimePeriod) iterator.next();
+
+            if (series == null)
+            {
+                series = new TimeSeries(seriesName, period.getClass());
+            }
+
+            series.add(period, (Number) seriesMap.get(period));
+        }
+        return series;
+    }
+
+    private Map<RegularTimePeriod, Number> getChangedIssues(List<StatusFact> facts,
+                                                            final PeriodName periodName,
+                                                            boolean to,
+                                                            int afterDays,
+                                                            Set<String> filterStatuses,
+                                                            Set<String> filterAssignee,
+                                                            boolean mergeStatuses
+                                                            ) throws IOException, SearchException {
+        Calendar afterDay = Calendar.getInstance();
+        afterDay.add(Calendar.DAY_OF_WEEK,-afterDays);
+        final Map<RegularTimePeriod, MutableInt> presult = new TreeMap<RegularTimePeriod, MutableInt>();
+        Class timePeriodClass = ChartUtil.getTimePeriodClass(periodName);
+        StatusFact previousFact = null;
+        //log.warn("to : " + to);
+        for (StatusFact fact : facts) {
+            if (filterFact(fact,filterAssignee,filterStatuses)) {
+               // log.warn("fact filtered : " + fact);
+                continue;
+            }
+
+            Timestamp when;
+
+          //  log.warn("prev fact : " + previousFact);
+          //  log.warn("fact : " + fact);
+
+            if (mergeStatuses) {
+                if (previousFact == null) {
+                    previousFact = new StatusFact(fact);
+                    continue;
+                } else {
+                    if (to) {
+                        if (previousFact.getWhen().getTime()+previousFact.getTime() == fact.getWhen().getTime() && previousFact.getPkey().equals(fact.getPkey())) {
+                            previousFact.setTime(previousFact.getTime() + fact.getTime());
+                            continue;
+                        }
+                    } else {
+                        if (previousFact.getWhen().getTime()+previousFact.getTime() == fact.getWhen().getTime() && previousFact.getPkey().equals(fact.getPkey())) {
+                            previousFact.setTime(previousFact.getTime() + fact.getTime());
+                            if (fact.isActive()) {
+                                previousFact = null; // just forgot that
+                            }
+                //            log.warn("merged fact : "  + previousFact);
+                            continue;
+                        }
+                    }
+
+                }
+                when = getWhen(previousFact,to);
+             //   log.warn("fact : " + previousFact + " goes to statistic");
+                if (!to && previousFact.isActive()) {
+                    previousFact = new StatusFact(fact);
+                    continue;
+                }
+                previousFact = new StatusFact(fact);
+            } else {
+           //     log.warn("fact : " + fact + " goes to statistic");
+                when = getWhen(fact,to);
+            }
+
+            incrementPresult(timePeriodClass, when, getTimeZone(), presult, afterDay);
+
+        }
+        if (previousFact != null) {
+            if (!filterFact(previousFact,filterAssignee, filterStatuses) && !(!to && previousFact.isActive())) {
+                Timestamp when = getWhen(previousFact,to);
+                incrementPresult(timePeriodClass, when, getTimeZone(), presult, afterDay);
+            }
+        }
+
+        Map<RegularTimePeriod, Number> result = new TreeMap<RegularTimePeriod, Number>();
+        for (Map.Entry<RegularTimePeriod, MutableInt> e : presult.entrySet()) {
+            result.put(e.getKey(),e.getValue().toInteger());
+        }
+        return result;
+    }
+
+    private boolean filterFact(StatusFact fact, Set<String> filterAssignee, Set<String> filterStatuses) {
+        if (filterAssignee != null && !filterAssignee.isEmpty() && !filterAssignee.contains(fact.getAssignee())) {
+            return true;
+        }
+        if (filterStatuses != null && !filterStatuses.isEmpty() && !filterStatuses.contains(fact.getStatus())) {
+            return true;
+        }
+        return false;
+    }
+
+    private void incrementPresult(Class timePeriodClass, Timestamp when, TimeZone timeZone, Map<RegularTimePeriod, MutableInt> presult, Calendar afterDay) {
+        if (when.before(afterDay.getTime())) {
+            return;
+        }
+        RegularTimePeriod factTime = RegularTimePeriod.createInstance(timePeriodClass, when, timeZone);
+        MutableInt val = presult.get(factTime);
+        if (val == null) {
+            presult.put(factTime,new MutableInt(1));
+        } else {
+            val.increment();
+        }
+    }
+
+    private Timestamp getWhen(StatusFact previousFact, boolean to) {
+        Timestamp when = null;
+        if (to) {
+            when = previousFact.getWhen();
+        } else {
+            when = previousFact.getWhen();
+            when.setTime(when.getTime()+previousFact.getTime());
+        }
+        return when;
+    }
+
+    private I18nBean getI18nBean(User user)
+    {
+        return new I18nBean(user);
+    }
+
+    //Returns whether the version is major, based on some version naming conventions. (This is an egregious major/minor
+    private boolean isMinorVersion(Version version)
+    {
+        return StringUtils.countMatches(version.getName(), ".") > 1 ||
+                StringUtils.contains(version.getName().toLowerCase(), "alpha") ||
+                StringUtils.contains(version.getName().toLowerCase(), "beta");
+    }
+}

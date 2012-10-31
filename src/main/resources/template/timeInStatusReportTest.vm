@@ -1,0 +1,10 @@
+#if($results)
+    <table>
+    <tbody>
+     #foreach($result in $results)
+        <tr><td>$result</td></tr>
+     #end
+     </tbody>
+     </table>
+#end
+$!logValue

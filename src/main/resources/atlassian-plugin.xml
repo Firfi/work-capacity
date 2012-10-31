@@ -1,0 +1,65 @@
+<atlassian-plugin key="${project.groupId}.${project.artifactId}" name="${project.name}" plugins-version="2">
+    <plugin-info>
+        <description>${project.description}</description>
+        <version>${project.version}</version>
+        <vendor name="${project.organization.name}" url="${project.organization.url}" />
+    </plugin-info>
+    <gadget key="capacity-chart-gadget" name="Capacity Issues" location="gadget/createdvsresolved-gadget.xml">
+        <param name="roles-required">browse</param>
+        <resource type="download" name="capacity-screenshot.png" location="images/capacity-screenshot.png"/>
+        <resource type="download" name="capacity-thumb.png" location="images/capacity-thumb.png"/>
+    </gadget>
+    <gadget key="capacity-history-chart-gadget" name="Capacity History" location="gadget/recently-created-gadget.xml">
+        <param name="roles-required">browse</param>
+        <resource type="download" name="capacity-history-screenshot.png" location="images/capacity-history-screenshot.png"/>
+        <resource type="download" name="capacity-history-thumb.png" location="images/capacity-history-thumb.png"/>
+    </gadget>
+    <rest key="gadgetRESTpoints" path="/mpsgadget" version="1.0" description="Provides REST endpoints used to display gadget contents.">
+        <!-- Render takes URL with .xml at the end (gadget URI) so need to make sure jersey doesn't try to return XML content -->
+        <init-param>
+            <param-name>com.atlassian.plugins.rest.module.filter.ExtensionJerseyFilter#excludes</param-name>
+            <param-value>/chart/render.*</param-value>
+        </init-param>
+        <dispatcher>REQUEST</dispatcher>
+        <dispatcher>FORWARD</dispatcher>
+        <dispatcher>INCLUDE</dispatcher>
+    </rest>
+    <webwork1 key="settings" name="settings">
+        <actions>
+            <action name="ru.megaplan.jira.plugins.gadget.work.capacity.action.MPSTestTimeInStatusesAction"
+                    alias="MPSTestTimeInStatusesActionNew">
+                <view name="success">/template/timeInStatusReportTest.vm</view>
+            </action>
+            <action name="ru.megaplan.jira.plugins.gadget.work.capacity.rate.action.TestRateAction"
+                    alias="TestRateAction">
+                <view name="success">/template/rateTest.vm</view>
+            </action>
+            <action name="ru.megaplan.jira.plugins.gadget.work.capacity.action.CommonTestAction"
+                    alias="CommonTestAction">
+                <view name="success">/template/rateTest.vm</view>
+            </action>
+        </actions>
+    </webwork1>
+    <component key="capacity-service"
+               name="Capacity Service"
+               class="ru.megaplan.jira.plugins.gadget.work.capacity.service.impl.CapacityHistoryServiceImpl"
+                public="true">
+        <interface>ru.megaplan.jira.plugins.gadget.work.capacity.service.CapacityHistoryService</interface>
+    </component>
+
+
+    <web-resource key="statusUserPickers" name="Status Picker" >
+        <resource type="download" name="statusPicker.js" location="js/statusPicker.js" />
+    </web-resource>
+
+    <customfield-type key="sla.be.cf" name="VertygoSLA" i18n-name-key="atlassian-plugin.component.sla.be.cf.name"
+                      class="ru.megaplan.jira.plugins.gadget.work.capacity.rate.customfield.RateCFType">
+        <description key="atlassian-plugin.component.sla.be.cf.description">Custom field that stores SLA information.
+        </description>
+        <!-- <resource type="velocity" name="view" location="templates/fields/view/view-sla-multi.vm" />
+        <resource type="velocity" name="column-view" location="templates/fields/view/column-view-sla-multi.vm" />
+        <resource type="velocity" name="edit" location="templates/fields/edit/edit-datetimeMulti.vm" />  -->
+    </customfield-type>
+
+
+</atlassian-plugin>

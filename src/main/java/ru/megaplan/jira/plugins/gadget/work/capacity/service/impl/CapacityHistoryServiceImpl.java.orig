@@ -1,0 +1,287 @@
+package ru.megaplan.jira.plugins.gadget.work.capacity.service.impl;
+
+import com.atlassian.crowd.embedded.api.User;
+import com.atlassian.jira.bc.issue.search.SearchService;
+import com.atlassian.jira.issue.Issue;
+import com.atlassian.jira.issue.IssueManager;
+import com.atlassian.jira.issue.search.SearchException;
+import com.atlassian.jira.issue.search.SearchResults;
+import com.atlassian.jira.user.util.UserManager;
+import com.atlassian.jira.util.NotNull;
+import com.atlassian.jira.web.bean.PagerFilter;
+import com.atlassian.query.Query;
+import org.apache.log4j.Logger;
+import org.ofbiz.core.entity.GenericDataSourceException;
+import org.ofbiz.core.entity.GenericEntityException;
+import org.ofbiz.core.entity.jdbc.SQLProcessor;
+import ru.megaplan.jira.plugins.gadget.work.capacity.action.util.ChangeBean;
+import ru.megaplan.jira.plugins.gadget.work.capacity.action.util.ChangeGroupBean;
+import ru.megaplan.jira.plugins.gadget.work.capacity.action.util.StatusFact;
+import ru.megaplan.jira.plugins.gadget.work.capacity.service.CapacityHistoryService;
+
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.*;
+
+/**
+ * Created with IntelliJ IDEA.
+ * User: firfi
+ * Date: 10.07.12
+ * Time: 17:23
+ * To change this template use File | Settings | File Templates.
+ */
+public class CapacityHistoryServiceImpl implements CapacityHistoryService {
+
+    private final static Logger log = Logger.getLogger(CapacityHistoryServiceImpl.class);
+
+    private final SQLProcessor sqlProcessor;
+    String ENTITY_DS = "defaultDS";
+    private final IssueManager issueManager;
+    private final SearchService searchService;
+    private final UserManager userManager;
+    private final String mainStatement = "select ji.pkey,ci.field, ci.oldvalue, ci.newvalue, cg.created, cg.id, ji.created as changegroupid from changegroup cg \n" +
+            "join jiraissue ji on ji.id = cg.issueid " +
+            "join changeitem ci on ci.groupid = cg.id " +
+            "where ci.fieldtype = 'jira' " +
+            "and ci.field in ('assignee','status') ";
+    private final String orderStatement = " order by pkey, created ";
+
+    CapacityHistoryServiceImpl(IssueManager issueManager, SearchService searchService, UserManager userManager) {
+        this.searchService = searchService;
+        this.userManager = userManager;
+        this.sqlProcessor = new SQLProcessor(ENTITY_DS);
+        this.issueManager = issueManager;
+        log.warn("init capacity service");
+    }
+
+    @Override
+    @NotNull
+    public List<StatusFact> getStatusFacts(String issuesJqlQuery, String caller) {
+        User callerUser = userManager.getUser(caller);
+        Query q = parseQuery(callerUser,issuesJqlQuery);
+        return getStatusFacts(q, callerUser);
+
+    }
+
+    private Query parseQuery(User callerUser, String issuesJqlQuery) {
+        SearchService.ParseResult parseResult = searchService.parseQuery(callerUser, issuesJqlQuery);
+        Query query = parseResult.getQuery();
+        return query;
+    }
+
+    private String getInStatement(Query query, User callerUser, Map<String, Issue> resultIssues) {
+        StringBuilder sqlInStatement = new StringBuilder(" and ji.id in(");
+        List<Issue> issues = new ArrayList<Issue>();
+        try {
+            SearchResults searchResults = searchService.search(callerUser, query, PagerFilter.getUnlimitedFilter());
+            issues.addAll(searchResults.getIssues());
+        } catch (SearchException e) {
+            e.printStackTrace();  //To change body of catch statement use File | Settings | File Templates.
+        }
+        final String comma = ",";
+        for (Issue issue : issues) {
+            sqlInStatement.append(issue.getId()).append(comma);
+            resultIssues.put(issue.getKey(), issue);
+        }
+        if (resultIssues.size() != 0) {
+            sqlInStatement.deleteCharAt(sqlInStatement.length()-1);
+        } else {
+            return " and ji.id is null ";
+        }
+        sqlInStatement.append(")");
+        return sqlInStatement.toString();
+    }
+
+    private String getStatus(ChangeBean cb, boolean newValue) {
+        if (cb.getField().equals("status")) {
+            if (!newValue) return cb.getOldvalue();
+            return cb.getNewvalue();
+        }
+        return null;
+    }
+
+    private String getAssignee(ChangeBean cb) {
+        if (cb.getField().equals("assignee")) return cb.getNewvalue();
+        return null;
+    }
+
+    private boolean isNewChangegroup(ChangeBean cb, ChangeGroupBean pcgb) {
+        return pcgb == null || pcgb.getGroupId() != cb.getChangegroupid();
+    }
+
+    private void fillNullStats(LinkedList<StatusFact> currentIssueStatusFacts, List<ChangeGroupBean> currentIssueChangeGroups) {
+        if (currentIssueChangeGroups.size() == 0) {
+   //         log.warn("currentIssueStatusFacts size : " + currentIssueStatusFacts.size());
+            return;
+        }
+        log.warn("filling null stats");
+        boolean foundFirstChangeStatusInIssue = false;
+        boolean foundFirstChangeAssigneeInIssue = false;
+        String firstAssignee = null;
+        String firstStatus = null;
+        for (ChangeGroupBean cgb : currentIssueChangeGroups) {
+            if (!foundFirstChangeAssigneeInIssue) {
+                if (cgb.getOldAssignee() != null) {
+                    foundFirstChangeAssigneeInIssue = true;
+                    firstAssignee = cgb.getOldAssignee();
+                }
+            }
+            if (!foundFirstChangeStatusInIssue) {
+                if (cgb.getOldStatus() != null) {
+                    foundFirstChangeStatusInIssue = true;
+                    firstStatus = cgb.getOldStatus();
+                }
+            }
+            if (foundFirstChangeAssigneeInIssue && foundFirstChangeStatusInIssue) break;
+        }
+
+        if (!(foundFirstChangeAssigneeInIssue && foundFirstChangeStatusInIssue)) {
+            Issue i = issueManager.getIssueObject(currentIssueChangeGroups.get(0).getPkey());
+            if (i == null) {
+                log.warn("issue with pkey : " + currentIssueChangeGroups.get(0).getPkey() + " is not found");
+            } else {
+  //              log.warn("checking issue : " + i.getKey());
+                try {
+                    if (firstAssignee == null) firstAssignee = i.getAssignee().getName();
+                    if (firstStatus == null) firstStatus = i.getStatusObject().getId();
+                } catch (NullPointerException e) {
+                    throw new NullPointerException(i.getKey() + " " + i.getAssignee());
+                }
+
+            }
+        }
+        StatusFact sf = new StatusFact(currentIssueChangeGroups.get(0).getOldAssignee(),
+                currentIssueChangeGroups.get(0).getOldStatus(),
+                currentIssueChangeGroups.get(0).getCreated().getTime()-currentIssueChangeGroups.get(0).getIssueCreated().getTime(),
+                currentIssueChangeGroups.get(0).getPkey(),
+                currentIssueChangeGroups.get(0).getIssueCreated(),
+                false
+                );
+        currentIssueStatusFacts.push(sf);
+        for (StatusFact statusFact : currentIssueStatusFacts) {
+            if (statusFact.getAssignee() != null && statusFact.getStatus() != null) break;
+            if (statusFact.getAssignee() == null) statusFact.setAssignee(firstAssignee);
+            if (statusFact.getStatus() == null) statusFact.setStatus(firstStatus);
+        }
+    }
+
+    private boolean isNewIssue(ChangeBean cb, ChangeBean pcb) {
+        if (pcb == null) return true;
+        return !(pcb.getPkey().equals(cb.getPkey()));
+    }
+
+    @Override
+    public List<StatusFact> getStatusFacts(Query jqlQuery, User caller) {
+        Map<String, Issue> issueKeysFromJql = new HashMap<String, Issue>();
+        long currentTimeInMillis = System.currentTimeMillis();
+        String issuesStatement = getInStatement(jqlQuery,caller, issueKeysFromJql);
+//        log.warn("main statement : " + mainStatement + issuesStatement + orderStatement);
+ //       log.warn("issueKeysFromJql before : " + issueKeysFromJql);
+        try {
+            sqlProcessor.prepareStatement(mainStatement + issuesStatement + orderStatement);
+        } catch (GenericEntityException e) {
+            e.printStackTrace();  //To change body of catch statement use File | Settings | File Templates.
+        }
+        ResultSet resultSet = null;
+        try {
+            resultSet = sqlProcessor.executeQuery();
+        } catch (GenericDataSourceException e) {
+            e.printStackTrace();  //To change body of catch statement use File | Settings | File Templates.
+        }
+
+        LinkedList<StatusFact> statusFacts = new LinkedList<StatusFact>();
+        LinkedList<StatusFact> currentIssueStatusFacts = new LinkedList<StatusFact>();
+        String currentAssignee = null;
+        String currentStatus = null;
+        List<ChangeGroupBean> currentIssueChangeGroups = new ArrayList<ChangeGroupBean>();
+        ChangeBean pcb = null;
+        ChangeGroupBean pcgb = null;
+        if (resultSet == null) return statusFacts;
+        try {
+            long executionTime = 0;
+            while(resultSet.next()) {
+                long timeStart = System.currentTimeMillis();
+    //            log.warn("start while");
+                ChangeBean cb = new ChangeBean(resultSet);
+    //            log.warn("cb : " + cb);
+                if (issueKeysFromJql.get(cb.getPkey()) != null) issueKeysFromJql.remove(cb.getPkey());
+                if (pcgb == null) {
+                    pcgb = new ChangeGroupBean();
+                }
+                if (!resultSet.isFirst()) {
+                    if (isNewIssue(cb,pcb)) {
+                        currentIssueChangeGroups.add(pcgb);
+                        currentIssueStatusFacts.add(new StatusFact(currentAssignee,
+                                currentStatus,
+                                currentTimeInMillis - pcgb.getCreated().getTime(),pcgb.getPkey(),
+                                pcgb.getCreated(),
+                                true
+                                ));
+                        fillNullStats(currentIssueStatusFacts, currentIssueChangeGroups);
+                        statusFacts.addAll(currentIssueStatusFacts);
+                        currentIssueStatusFacts.clear();
+                        currentIssueChangeGroups.clear();
+                        //flushStats();
+                        currentAssignee = null;
+                        currentStatus = null;
+                        //flushChangeGroup();
+                        pcgb = new ChangeGroupBean();
+                    } else
+                    if (isNewChangegroup(cb, pcgb)) {
+                        //addPreviousChangeGroup();
+                        currentIssueChangeGroups.add(pcgb);
+                        StatusFact sf = new StatusFact(currentAssignee,
+                                currentStatus,
+                                cb.getCreated().getTime() - pcgb.getCreated().getTime(),
+                                pcgb.getPkey(),
+                                pcgb.getCreated(),
+                                false);
+                        currentIssueStatusFacts.add(sf);
+                        //flushChangeGroup();
+                        pcgb = new ChangeGroupBean();
+                    }
+                }
+                if (getAssignee(cb) != null) currentAssignee = getAssignee(cb);
+                if (getStatus(cb, true) != null) currentStatus = getStatus(cb, true);
+                //addChangeItem();
+                pcgb.addChangeBean(cb);
+                if (resultSet.isLast()) {
+                    currentIssueChangeGroups.add(pcgb);
+                    StatusFact sf = new StatusFact(currentAssignee,
+                            currentStatus,
+                            currentTimeInMillis - pcgb.getCreated().getTime(),
+                            pcgb.getPkey(),pcgb.getCreated(),
+                            true);
+                    currentIssueStatusFacts.add(sf);
+                    //fillNullStats();
+                    fillNullStats(currentIssueStatusFacts, currentIssueChangeGroups);
+                    //addGlobal();
+                    statusFacts.addAll(currentIssueStatusFacts);
+                    break;
+                }
+                pcb = cb;
+                executionTime += System.currentTimeMillis() - timeStart;
+                if (executionTime > 15000) throw new Error("forever love here");
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();  //To change body of catch statement use File | Settings | File Templates.
+        }
+   //     log.warn("issue keys now : " + issueKeysFromJql);
+        if (issueKeysFromJql.size() > 0) {
+            addCreatedFacts(statusFacts, issueKeysFromJql, currentTimeInMillis);
+        }
+        return statusFacts;
+    }
+
+    private void addCreatedFacts(LinkedList<StatusFact> statusFacts, Map<String,Issue> issueKeysFromJql, long currentTimeInMillis) {
+        for (Map.Entry<String, Issue> e : issueKeysFromJql.entrySet()) {
+            Issue issue = e.getValue();
+            statusFacts.add(new StatusFact(issue.getAssignee()!=null?issue.getAssignee().getName():"NULL",
+                    issue.getStatusObject().getId(),
+                    currentTimeInMillis - issue.getCreated().getTime(),
+                    e.getKey(),
+                    issue.getCreated(),
+                    true));
+        }
+    }
+}
