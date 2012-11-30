@@ -140,8 +140,10 @@ public class CapacityChart
             Map<String, MutableDouble> oldFactsSumForAssigneeCreatedSum = new HashMap<String, MutableDouble>();
             Map<String, MutableDouble> oldFactsSumForAssigneeResolvedSum = new HashMap<String, MutableDouble>();
 
-            final Map<String, Map<RegularTimePeriod, Number>> createdDataMapSum = getChangedIssues(facts, periodName, true, daysBefore, daysAfter, statusesIn, assignees, mergeStatuses, getTimeZone(), false, oldFactsSumForAssigneeCreatedSum);
-            final Map<String, Map<RegularTimePeriod, Number>> resolvedDataMapSum = getChangedIssues(facts, periodName, false, daysBefore, daysAfter, statusesIn, assignees, mergeStatuses, getTimeZone(), false, oldFactsSumForAssigneeResolvedSum);
+            final Map<String, Map<RegularTimePeriod, Number>> createdDataMapSum =
+                    getChangedIssues(facts, periodName, true, daysBefore, daysAfter, statusesIn, assignees, mergeStatuses, getTimeZone(), false, oldFactsSumForAssigneeCreatedSum);
+            final Map<String, Map<RegularTimePeriod, Number>> resolvedDataMapSum =
+                    getChangedIssues(facts, periodName, false, daysBefore, daysAfter, statusesIn, assignees, mergeStatuses, getTimeZone(), false, oldFactsSumForAssigneeResolvedSum);
 
             RecentlyCreatedChart.normalizeData(createdDataMapSum, resolvedDataMapSum, daysBefore - 1, daysAfter, timePeriodClass, timeZoneManager.getLoggedInUserTimeZone(), makeResolvedNegative);
             RecentlyCreatedChart.normalizeData(сreatedDataMapByAssignee, resolvedDataMapByAssignee, daysBefore - 1, daysAfter, timePeriodClass, timeZoneManager.getLoggedInUserTimeZone(), makeResolvedNegative);
@@ -477,7 +479,19 @@ public class CapacityChart
             String assignee = factsForAssignee.getKey();
             MutableDouble oldFactsSum = new MutableDouble(0);
             if (countOldFacts) oldFactsSumForAssignee.put(assignee, oldFactsSum);
-            TreeMap<RegularTimePeriod, MutableDouble> resultForAssignee = getFactsSum(factsForAssignee.getValue(), filterAssignee, filterStatuses, mergeStatuses, to, timePeriodClass, timeZone, daysBefore, daysAfter , oldFactsSum, countOldFacts);
+            TreeMap<RegularTimePeriod, MutableDouble> resultForAssignee =
+                    getFactsSum(factsForAssignee.getValue(),
+                            filterAssignee,
+                            filterStatuses,
+                            mergeStatuses,
+                            to,
+                            timePeriodClass,
+                            timeZone,
+                            daysBefore,
+                            daysAfter,
+                            oldFactsSum,
+                            countOldFacts
+                    );
             presult.put(assignee, resultForAssignee);
         }
 
@@ -492,7 +506,17 @@ public class CapacityChart
         return result;
     }
 
-    private static TreeMap<RegularTimePeriod, MutableDouble> getFactsSum(List<StatusFact> facts, Set<String> filterAssignee, Set<String> filterStatuses, boolean mergeStatuses, boolean to, Class timePeriodClass, TimeZone timeZone, int daysBefore, int daysAfter, MutableDouble oldFactsSum, boolean countOldFacts) {
+    private static TreeMap<RegularTimePeriod, MutableDouble> getFactsSum(List<StatusFact> facts,
+                                                                         Set<String> filterAssignee,
+                                                                         Set<String> filterStatuses,
+                                                                         boolean mergeStatuses,
+                                                                         boolean to,
+                                                                         Class timePeriodClass,
+                                                                         TimeZone timeZone,
+                                                                         int daysBefore,
+                                                                         int daysAfter,
+                                                                         MutableDouble oldFactsSum,
+                                                                         boolean countOldFacts) {
         Calendar afterDay = Calendar.getInstance();
         afterDay.add(Calendar.DAY_OF_WEEK,-daysBefore);
         Calendar beforeDay = null;
